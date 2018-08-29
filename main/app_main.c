@@ -267,6 +267,8 @@ void app_main()
     strftime(strftime_buf, sizeof(strftime_buf), "%c", &timeinfo);
     ESP_LOGI(TAG, "The current date/time is: %s", strftime_buf);
     printf("Time: %s\n", strftime_buf);
+    char boot_time[64];
+    strcpy(boot_time, strftime_buf);
 
     ip_addr_t ip_Addr;
     IP_ADDR4( &ip_Addr, 8, 8, 8, 8);
@@ -289,7 +291,7 @@ void app_main()
 
     esp_mqtt_client_handle_t client = mqtt_app_start();
 
-    char msg[120];
+    char msg[200];
     while (1) {
         if (online == 0) printf("Offline!!\n");
         
@@ -302,10 +304,12 @@ void app_main()
        
         strcpy(msg, "{\"command\": \"udevice\", \"idx\": 138, \"svalue\": \"");
         strcat(msg, strftime_buf);
-        strcat(msg, ",SSID: ");
+        strcat(msg, ", SSID: ");
         strcat(msg, ssid);
         strcat(msg, ", IP: ");
         strcat(msg, esp_ip);
+        strcat(msg, ", Boot: ");
+        strcat(msg, boot_time);
         strcat(msg, "\"}");
         printf("Publish Data: %s\n", msg);
         esp_mqtt_client_publish(client, "domoticz/in", msg, sizeof(msg), 0, 0); 
