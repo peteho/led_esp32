@@ -27,7 +27,11 @@
 #include "ping.h"
 #include "esp_ping.h"
 
+#include "driver/gpio.h"
+
 #include "config.h"  // SSIDs, PSKs, URIs ...
+
+#define BLINK_GPIO 2  // Pin 2 builtin LED
 
 static const char *TAG = "LED_ESP32";
 
@@ -36,6 +40,22 @@ const static int CONNECTED_BIT = BIT0;
 static char ssid[33];
 static char esp_ip[16];
 static int online = 0;
+
+void blink_task(void *pvParameter)
+{
+    gpio_pad_select_gpio(BLINK_GPIO);
+    /* Set the GPIO as a push/pull output */
+    gpio_set_direction(BLINK_GPIO, GPIO_MODE_OUTPUT);
+    while(1) {
+        /* Blink off (output low) */
+        gpio_set_level(BLINK_GPIO, 0);
+        vTaskDelay((online ? 1950 : 150) / portTICK_PERIOD_MS);
+        /* Blink on (output high) */
+        gpio_set_level(BLINK_GPIO, 1);
+        vTaskDelay(50 / portTICK_PERIOD_MS);
+    }
+}
+
 
 esp_err_t pingResults(ping_target_id_t msgType, esp_ping_found * pf){
     //printf("AvgTime:%.1fmS Sent:%d Rec:%d Err:%d min(mS):%d max(mS):%d\n", (float)pf->total_time/pf->recv_count, 
@@ -246,6 +266,8 @@ void app_main()
     */
 
     nvs_flash_init();
+    xTaskCreate(&blink_task, "blink_task", configMINIMAL_STACK_SIZE, NULL, 5, NULL);
+    
     wifi_init();
 
     time_t now;
