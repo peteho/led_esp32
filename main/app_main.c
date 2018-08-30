@@ -39,7 +39,13 @@ static EventGroupHandle_t wifi_event_group;
 const static int CONNECTED_BIT = BIT0;
 static char ssid[33];
 static char esp_ip[16];
+static char boot_time[64];
 static int online = 0;
+static int mqtt_connected = 0;
+esp_mqtt_client_handle_t client;
+TaskHandle_t wifi_init_task_handle = NULL;
+
+
 
 void blink_task(void *pvParameter)
 {
@@ -60,9 +66,66 @@ void blink_task(void *pvParameter)
 esp_err_t pingResults(ping_target_id_t msgType, esp_ping_found * pf){
     //printf("AvgTime:%.1fmS Sent:%d Rec:%d Err:%d min(mS):%d max(mS):%d\n", (float)pf->total_time/pf->recv_count, 
     //   pf->send_count, pf->recv_count, pf->err_count, pf->min_time, pf->max_time );
-    if (pf->err_count == 0) online = 1;
+    if (pf->send_count == pf->recv_count) online = 1;
     else online = 0;
     return ESP_OK;
+}
+
+void pingcheck_task(void *pvParameter)
+{
+    ip_addr_t ip_Addr;
+    IP_ADDR4( &ip_Addr, 8, 8, 8, 8);
+    uint32_t ping_count = 1;  //how many pings per report
+    uint32_t ping_timeout = 3000; //mS till we consider it timed out
+    uint32_t ping_delay = 500; //mS between pings
+
+    esp_ping_set_target(PING_TARGET_IP_ADDRESS_COUNT, &ping_count, sizeof(uint32_t));
+    esp_ping_set_target(PING_TARGET_RCV_TIMEO, &ping_timeout, sizeof(uint32_t));
+    esp_ping_set_target(PING_TARGET_DELAY_TIME, &ping_delay, sizeof(uint32_t));
+    esp_ping_set_target(PING_TARGET_IP_ADDRESS, &ip_Addr, sizeof(uint32_t));
+    esp_ping_set_target(PING_TARGET_RES_FN, &pingResults, sizeof(pingResults));
+
+    while (1) {
+        //printf("Pinging IP %s\n", inet_ntoa(ip_Addr));
+        ping_init();
+        vTaskDelay(10000 / portTICK_PERIOD_MS);
+    }
+}
+
+void publish_task(void *pvParameter) 
+{   
+    time_t now;
+    struct tm timeinfo;
+    char strftime_buf[64]; 
+    char msg[200];
+
+    while (1) {
+        time(&now);
+        localtime_r(&now, &timeinfo);
+				if (timeinfo.tm_year < (2016 - 1900)) {
+					sntp_init();
+				}
+        strftime(strftime_buf, sizeof(strftime_buf), "%c", &timeinfo);
+
+        strcpy(msg, "{\"command\": \"udevice\", \"idx\": 138, \"svalue\": \"");
+        strcat(msg, strftime_buf);
+        strcat(msg, ", SSID: ");
+        strcat(msg, ssid);
+        strcat(msg, ", IP: ");
+        strcat(msg, esp_ip);
+        strcat(msg, ", Boot: ");
+        strcat(msg, boot_time);
+        strcat(msg, "\"}");
+				if (mqtt_connected) {
+					printf("Publish Data: %s\n", msg);
+					esp_mqtt_client_publish(client, "domoticz/in", msg, sizeof(msg), 0, 0);
+				} else {
+					printf("mqtt disconnected\n");
+				}
+				esp_mqtt_client_publish(client, "stat/esp32/online", "1", 1, 0, 0);
+				
+        vTaskDelay(60000 / portTICK_PERIOD_MS);
+    }
 }
 
 static esp_err_t wifi_event_handler(void *ctx, system_event_t *event)
@@ -83,6 +146,10 @@ static esp_err_t wifi_event_handler(void *ctx, system_event_t *event)
             strcpy(esp_ip, ip4addr_ntoa(&event->event_info.got_ip.ip_info.ip));
             xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
             break;
+        case SYSTEM_EVENT_STA_LOST_IP:
+				    printf("STA_LOST_IP");
+				    online = 0;
+						break;
         case SYSTEM_EVENT_STA_DISCONNECTED:
             esp_wifi_connect();
             xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
@@ -100,9 +167,10 @@ static esp_err_t wifi_event_handler(void *ctx, system_event_t *event)
     return ESP_OK;
 }
 
-static void wifi_init(void)
+//static void wifi_init(void)
+void wifi_init_task(void *pvParameter) 
 {
-    tcpip_adapter_init();
+    //tcpip_adapter_init();
     wifi_event_group = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_event_loop_init(wifi_event_handler, NULL));
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
@@ -125,10 +193,10 @@ static void wifi_init(void)
     wifi_ap_record_t ap_records[ap_num];
     esp_wifi_scan_get_ap_records(&ap_num, ap_records);
 
-    //printf("%d SSIDs found:\n", ap_num);
-    //printf(" Channel | RSSI | SSID \n");
+    printf("%d SSIDs found:\n", ap_num);
+    printf(" Channel | RSSI | SSID \n");
     for (int i = 0; i < ap_num; i++) {
-        //printf("%8d |%5d | %-27s \n", ap_records[i].primary, ap_records[i].rssi, (char *)ap_records[i].ssid);
+        printf("%8d |%5d | %-27s \n", ap_records[i].primary, ap_records[i].rssi, (char *)ap_records[i].ssid);
         if (strcmp((char *)ap_records[i].ssid, CONFIG_WIFI_SSID) == 0) {
             strcpy((char *)wifi_config.sta.password, (const char*)CONFIG_WIFI_PASSWORD);
             ssid_found = 1;
@@ -139,6 +207,10 @@ static void wifi_init(void)
         }
         if (strcmp((char *)ap_records[i].ssid, WIFI_SSID2) == 0) {
             strcpy((char *)wifi_config.sta.password, (const char*)WIFI_PSK2);
+            ssid_found = 1;
+	}
+        if (strcmp((char *)ap_records[i].ssid, WIFI_SSID3) == 0) {
+            strcpy((char *)wifi_config.sta.password, (const char*)WIFI_PSK3);
             ssid_found = 1;
 	}
         if (ssid_found == 1) {
@@ -156,6 +228,7 @@ static void wifi_init(void)
     ESP_LOGI(TAG, "Waiting for wifi");
     ESP_ERROR_CHECK(esp_wifi_connect());
     xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT, false, true, portMAX_DELAY);
+		vTaskDelete(wifi_init_task_handle);
 }
 
 extern const uint8_t iot_eclipse_org_pem_start[] asm("_binary_iot_eclipse_org_pem_start");
@@ -168,8 +241,12 @@ static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
     // your_context_t *context = event->context;
     switch (event->event_id) {
         case MQTT_EVENT_CONNECTED:
+            mqtt_connected = 1;
             ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
             msg_id = esp_mqtt_client_subscribe(client, "cmnd/esp32/restart", 0);
+            ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
+
+            msg_id = esp_mqtt_client_subscribe(client, "stat/esp32/online", 0);
             ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
 
             msg_id = esp_mqtt_client_subscribe(client, "cmnd/esp32/qos1", 1);
@@ -179,13 +256,14 @@ static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
             ESP_LOGI(TAG, "sent unsubscribe successful, msg_id=%d", msg_id);
             break;
         case MQTT_EVENT_DISCONNECTED:
+            mqtt_connected = 0;
             ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
             break;
 
         case MQTT_EVENT_SUBSCRIBED:
             ESP_LOGI(TAG, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
-            msg_id = esp_mqtt_client_publish(client, "stat/esp32/domoticz", "subscribed", 0, 0, 0);
-            ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+            //msg_id = esp_mqtt_client_publish(client, "stat/esp32/online", "1", 0, 0, 0);
+            //ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
             break;
         case MQTT_EVENT_UNSUBSCRIBED:
             ESP_LOGI(TAG, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
@@ -195,8 +273,12 @@ static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
             break;
         case MQTT_EVENT_DATA:
             ESP_LOGI(TAG, "MQTT_EVENT_DATA");
-            printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
-            printf("DATA=%.*s\r\n", event->data_len, event->data);
+            //printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
+            //printf("DATA=%.*s\r\n", event->data_len, event->data);
+						if (strncmp("stat/esp32/online", event->topic, event->topic_len) == 0) {
+							printf("hearbeat received\n");
+							mqtt_connected = 1;
+						}
             break;
         case MQTT_EVENT_ERROR:
             ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
@@ -249,8 +331,35 @@ static void obtain_time(void)
     }
 }
 
+void time_init()
+{
+    time_t now;
+    struct tm timeinfo;
+    char strftime_buf[64];
+
+    time(&now);
+    localtime_r(&now, &timeinfo);
+    // Is time set? If not, tm_year will be (1970 - 1900).
+    if (timeinfo.tm_year < (2016 - 1900)) {
+        ESP_LOGI(TAG, "Time is not set yet. Connecting to WiFi and getting time over NTP.");
+        obtain_time();
+        // update 'now' variable with current time
+        time(&now);
+    }
+
+    setenv("TZ", "CET-1CEST,M3.5.0/2,M10.5.0/3", 1);
+    tzset();
+    localtime_r(&now, &timeinfo);
+    strftime(strftime_buf, sizeof(strftime_buf), "%c", &timeinfo);
+    ESP_LOGI(TAG, "The current date/time is: %s", strftime_buf);
+    printf("Time: %s\n", strftime_buf);
+    strcpy(boot_time, strftime_buf);
+}
+
 void app_main()
 {
+    TaskHandle_t publish_task_handle = NULL; //, wifi_init_task_handle = NULL;
+
     ESP_LOGI(TAG, "[APP] Startup..");
     ESP_LOGI(TAG, "[APP] Free memory: %d bytes", esp_get_free_heap_size());
     ESP_LOGI(TAG, "[APP] IDF version: %s", esp_get_idf_version());
@@ -266,74 +375,44 @@ void app_main()
     */
 
     nvs_flash_init();
+    printf("starting blink task\n");
     xTaskCreate(&blink_task, "blink_task", configMINIMAL_STACK_SIZE, NULL, 5, NULL);
+
+		tcpip_adapter_init();
+    printf("starting pingcheck task\n");
+    xTaskCreate(&pingcheck_task, "pingcheck_task", configMINIMAL_STACK_SIZE, NULL, 5, NULL);
     
-    wifi_init();
+		xTaskCreate(&wifi_init_task, "wifi_init_task", 2048, NULL, 5, &wifi_init_task_handle);
+    //wifi_init();
+		
+		int timeout = 0;
+		while (!online && timeout++ < 60) {
+			vTaskDelay(1000 / portTICK_PERIOD_MS);
+		}
+		if (wifi_init_task_handle == NULL) {
+		  vTaskDelete(wifi_init_task_handle);
+		}
+		
+    time_init();
 
-    time_t now;
-    struct tm timeinfo;
-    time(&now);
-    localtime_r(&now, &timeinfo);
-    // Is time set? If not, tm_year will be (1970 - 1900).
-    if (timeinfo.tm_year < (2016 - 1900)) {
-        ESP_LOGI(TAG, "Time is not set yet. Connecting to WiFi and getting time over NTP.");
-        obtain_time();
-        // update 'now' variable with current time
-        time(&now);
-    }
-    char strftime_buf[64];
-
-    setenv("TZ", "CET-1CEST,M3.5.0/2,M10.5.0/3", 1);
-    tzset();
-    localtime_r(&now, &timeinfo);
-    strftime(strftime_buf, sizeof(strftime_buf), "%c", &timeinfo);
-    ESP_LOGI(TAG, "The current date/time is: %s", strftime_buf);
-    printf("Time: %s\n", strftime_buf);
-    char boot_time[64];
-    strcpy(boot_time, strftime_buf);
-
-    ip_addr_t ip_Addr;
-    IP_ADDR4( &ip_Addr, 8, 8, 8, 8);
-    uint32_t ping_count = 1;  //how many pings per report
-    uint32_t ping_timeout = 3000; //mS till we consider it timed out
-    uint32_t ping_delay = 500; //mS between pings
-
-    esp_ping_set_target(PING_TARGET_IP_ADDRESS_COUNT, &ping_count, sizeof(uint32_t));
-    esp_ping_set_target(PING_TARGET_RCV_TIMEO, &ping_timeout, sizeof(uint32_t));
-    esp_ping_set_target(PING_TARGET_DELAY_TIME, &ping_delay, sizeof(uint32_t));
-    esp_ping_set_target(PING_TARGET_IP_ADDRESS, &ip_Addr, sizeof(uint32_t));
-    esp_ping_set_target(PING_TARGET_RES_FN, &pingResults, sizeof(pingResults));
-
-    //printf("Pinging IP %s\n", inet_ntoa(ip_Addr));
-    ping_init();
-    while (online == 0) {
-        //printf("not online...\n");
-        vTaskDelay(500 / portTICK_PERIOD_MS);
-    }
-
-    esp_mqtt_client_handle_t client = mqtt_app_start();
-
-    char msg[200];
     while (1) {
-        if (online == 0) printf("Offline!!\n");
-        
-        vTaskDelay(60000 / portTICK_PERIOD_MS);
-        ping_init();
-        
-        time(&now);
-        localtime_r(&now, &timeinfo);
-        strftime(strftime_buf, sizeof(strftime_buf), "%c", &timeinfo); 
-       
-        strcpy(msg, "{\"command\": \"udevice\", \"idx\": 138, \"svalue\": \"");
-        strcat(msg, strftime_buf);
-        strcat(msg, ", SSID: ");
-        strcat(msg, ssid);
-        strcat(msg, ", IP: ");
-        strcat(msg, esp_ip);
-        strcat(msg, ", Boot: ");
-        strcat(msg, boot_time);
-        strcat(msg, "\"}");
-        printf("Publish Data: %s\n", msg);
-        esp_mqtt_client_publish(client, "domoticz/in", msg, sizeof(msg), 0, 0); 
+        if (online) {
+            //printf("ONLINE\n");
+            if (publish_task_handle == NULL) {
+                printf("starting publish task\n");
+                client = mqtt_app_start();
+                //vTaskDelay(1000 / portTICK_PERIOD_MS);
+                xTaskCreate(&publish_task, "publish_task", 2048, NULL, 5, &publish_task_handle);
+            }
+        } else { // offline
+            printf("!!! OFFLINE !!!\n");
+            if (publish_task_handle != NULL) {
+                printf("deleting publish task\n");
+                vTaskDelete(publish_task_handle);
+								publish_task_handle = NULL;
+            }
+        }
+				
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
 }

@@ -15,6 +15,9 @@
 #define WIFI_SSID2	"raspberrypi"
 #define WIFI_PSK2	"r@spb3rrYPi"
 
+#define WIFI_SSID3	"pPhone"
+#define WIFI_PSK3	"yhpx4300"
+
 // ### MQTT Data ###
 #define MQTT_URI	"mqtts://fuzzi.endres-hoppe.de:8883"
 #define MQTT_HOST	"fuzzi.endres-hoppe.de"
